@@ -1,0 +1,379 @@
+# =============================================
+# さばけ！おさかな AWS デプロイ手順書
+# =============================================
+#
+# 対象者: 会社のAWS環境にデプロイする担当者
+# 前提: AWS CLIが使える環境（CloudShell推奨）
+# 所要時間: 約15分（初回セットアップ）
+#
+
+# =============================================
+# 1. 全体像
+# =============================================
+overview:
+  what_this_game_is: |
+    Unity WebGLで作ったブラウザゲーム。
+    S3+CloudFrontでホスティングし、ランキングAPIはサーバーレスで構築する。
+
+  architecture_diagram: |
+    ┌──── ブラウザ ──────────────────────────────────────┐
+    │                                                    │
+    │  WebGLゲーム（Unity）                               │
+    │  ├── ゲーム本体（.wasm, .js, .data）                │
+    │  ├── env.json（API URLの設定）                      │
+    │  └── LeaderboardClient.cs（ランキング通信）          │
+    │                                                    │
+    └────────┬─────── HTTPS ─────────┬──────────────────┘
+             │ ゲーム配信             │ ランキングAPI
+             ▼                       ▼
+    ┌─── AWS (Tokyo) ────────────────────────────────────┐
+    │                                                    │
+    │  【ゲーム配信】           【ランキングAPI】          │
+    │                                                    │
+    │  CloudFront (HTTPS)     API Gateway (HTTP API)     │
+    │       │                      │                     │
+    │       ▼                      ▼                     │
+    │  S3 バケット              Lambda (Python)          │
+    │  (WebGLビルド一式)            │                     │
+    │                              ▼                     │
+    │                         DynamoDB                   │
+    │                         (スコア保存)                │
+    │                                                    │
+    └────────────────────────────────────────────────────┘
+
+  why_each_service:
+    S3: "WebGLビルド（html/js/wasm/data）の置き場所"
+    CloudFront: "S3の前段。HTTPSを提供（WebGLはHTTPS必須）+ キャッシュで高速配信"
+    API_Gateway: "ランキングAPI のエントリポイント。CORSも処理"
+    Lambda: "スコア登録(POST)・取得(GET)のロジック"
+    DynamoDB: "スコアデータの保存先。GSIでスコア降順クエリ"
+
+  cost: |
+    全て AWS 無料枠内で運用可能（個人AWSの場合12ヶ月制限あり）
+    - S3: 5GB（無料枠）  ※WebGLビルドは約20-50MB程度
+    - CloudFront: 月1TB転送（無料枠）
+    - DynamoDB: 25GB + 25WCU/25RCU（永久無料枠）
+    - Lambda: 月100万リクエスト（永久無料枠）
+    - API Gateway: 月100万リクエスト（12ヶ月無料枠）
+
+# =============================================
+# 2. deploy ブランチの構造
+# =============================================
+deploy_branch:
+  description: |
+    GitHubリポジトリの deploy ブランチに全ファイルが入っている。
+    担当者は git clone するだけでスクリプトもビルドも取得できる。
+
+  folder_structure: |
+    deploy ブランチ:
+    ├── aws-setup/                ← デプロイスクリプト群
+    │   ├── .env.example          ← 設定テンプレ（リージョン、バケット名等）
+    │   ├── setup-leaderboard.sh  ← ランキングAPI構築（Step 1）
+    │   ├── setup-hosting.sh      ← S3+CloudFront構築（Step 2）
+    │   ├── deploy-webgl.sh       ← S3にデプロイ（Step 3, 以降毎回）
+    │   ├── cleanup-leaderboard.sh ← API削除（やり直し用）
+    │   └── cleanup-hosting.sh    ← ホスティング削除（やり直し用）
+    ├── webgl-build/              ← WebGLビルド成果物（git管理）
+    │   ├── index.html
+    │   ├── Build/
+    │   ├── StreamingAssets/
+    │   │   ├── env.json.example  ← API URL テンプレ
+    │   │   └── env.json          ← 担当者が作成（.gitignore済み）
+    │   └── TemplateData/
+    └── AWS_README.yaml           ← この手順書
+
+# =============================================
+# 3. セットアップ手順
+# =============================================
+setup_procedure:
+
+  preparation:
+    title: "事前準備"
+    steps:
+      - "AWSコンソールにログイン"
+      - "右上のリージョンが「東京 (ap-northeast-1)」であることを確認"
+      - "右上の CloudShell アイコンをクリックしてターミナルを開く"
+      - "以下のコマンドでリポジトリを取得:"
+    commands:
+      - "git clone --branch deploy --single-branch https://github.com/Unutsun/Unity.git sabake-deploy"
+      - "cd sabake-deploy"
+      - "cp aws-setup/.env.example aws-setup/.env"
+    after_clone: |
+      aws-setup/.env を開いて、必要なら S3_BUCKET_NAME を変更する。
+    note: |
+      プライベートリポジトリのため、GitHub認証情報が必要。
+      CloudShell で git clone に失敗した場合は、GitHub の Personal Access Token を使う:
+        git clone https://<TOKEN>@github.com/Unutsun/Unity.git sabake-deploy --branch deploy --single-branch
+
+  step_1:
+    title: "ランキングAPI構築"
+    what_it_does: "DynamoDB + Lambda + API Gateway を作成"
+    commands:
+      - "bash aws-setup/setup-leaderboard.sh"
+    output: |
+      最後に表示される API URL をメモする:
+        API URL: https://xxxxxxxxxx.execute-api.ap-northeast-1.amazonaws.com/prod
+    verify: |
+      表示されたURLでcurlテスト:
+        curl -X POST {URL}/scores \
+          -H 'Content-Type: application/json' \
+          -d '{"playerName":"テスト","score":100,"rank":"テスト級","clearPercent":50}'
+        curl {URL}/scores?limit=10
+      POSTで "Score submitted"、GETでデータが返ればOK。
+
+  step_2:
+    title: "ホスティング環境構築"
+    what_it_does: "S3バケット + CloudFront (HTTPS) を作成"
+    commands:
+      - "bash aws-setup/setup-hosting.sh"
+    output: |
+      最後に表示される CloudFront URL をメモする:
+        CloudFront URL: https://xxxxxxxxxxxxxx.cloudfront.net
+      .env に CLOUDFRONT_DIST_ID と CLOUDFRONT_DOMAIN が自動追記される。
+    note: "CloudFrontの反映に5-10分かかる場合がある"
+
+  step_3:
+    title: "env.json を作成"
+    what_it_does: "ビルド内にAPI URLを設定する"
+    substeps:
+      - title: "env.json を作成"
+        detail: |
+          webgl-build/StreamingAssets/env.json.example を env.json にコピーし、
+          step_1 で取得したAPI URLを記入:
+            cp webgl-build/StreamingAssets/env.json.example webgl-build/StreamingAssets/env.json
+          内容:
+            {
+              "environment": "production",
+              "leaderboardApiUrl": "https://xxxxxxxxxx.execute-api.ap-northeast-1.amazonaws.com/prod"
+            }
+    note: |
+      env.json は .gitignore で除外されているため、git pull で上書きされない。
+      一度作成すればゲーム更新時も再作成不要。
+
+  step_4:
+    title: "ビルドをS3にデプロイ"
+    what_it_does: |
+      webgl-build/ のWebGLビルドをS3にアップロード。
+      .wasm.gz / .data.gz / .js.gz に正しいContent-Type/Content-Encoding を設定。
+      CloudFrontキャッシュを無効化。
+    commands:
+      - "bash aws-setup/deploy-webgl.sh"
+    note: |
+      引数なしで実行すると自動的に ../webgl-build を参照する。
+      deploy-webgl.sh は何度でも実行可能。
+
+  step_5:
+    title: "動作確認"
+    detail: |
+      ブラウザで CloudFront URL にアクセス:
+        https://xxxxxxxxxxxxxx.cloudfront.net
+
+      確認ポイント:
+        1. ゲームが表示される
+        2. ゲームをプレイしてクリア
+        3. スコアが送信される（ブラウザのF12コンソールで確認）
+        4. ランキング画面にTOP10が表示される
+
+    browser_console_logs: |
+      正常時に表示されるログ:
+        [GameConfig] env.json loaded: environment=production, apiUrl=https://...
+        [LeaderboardClient] POST .../scores : {...}
+        [LeaderboardClient] Score submitted: {"message": "Score submitted", ...}
+        [LeaderboardClient] GET .../scores?limit=10
+        [LeaderboardClient] Scores received: [{...}]
+
+# =============================================
+# 4. ゲーム更新時の手順（2回目以降）
+# =============================================
+update_procedure:
+  description: "ゲームが更新された場合、以下の2コマンドだけでOK"
+  commands:
+    - "git pull"
+    - "bash aws-setup/deploy-webgl.sh"
+  note: |
+    git pull で最新のビルドが webgl-build/ に反映される。
+    deploy-webgl.sh がそれをS3にアップロードし、CloudFrontキャッシュを無効化。
+    env.json は .gitignore で除外されているため、git pull で消えない。
+    setup-leaderboard.sh と setup-hosting.sh は初回のみ。
+
+# =============================================
+# 5. WebGLビルドの注意事項
+# =============================================
+webgl_build_notes:
+  compression: |
+    Unity の Compression Format: Gzip を使用（現在の設定）。
+    S3にアップロードする際、.gz ファイルには以下のヘッダーが必要:
+      .wasm.gz → Content-Type: application/wasm, Content-Encoding: gzip
+      .data.gz → Content-Type: application/octet-stream, Content-Encoding: gzip
+      .js.gz   → Content-Type: application/javascript, Content-Encoding: gzip
+    deploy-webgl.sh がこれを自動処理するため手動設定は不要。
+
+  https_requirement: |
+    WebGL の Gzip 圧縮ファイルを正常にロードするには HTTPS が必要。
+    CloudFront が HTTPS を提供するため、直接 S3 URL ではなく
+    CloudFront URL（https://xxxxx.cloudfront.net）でアクセスすること。
+
+  do_not_use_s3_sync_directly: |
+    aws s3 sync を単独で使うと Content-Encoding が設定されず、
+    ブラウザが .gz ファイルを正常に展開できない。
+    必ず deploy-webgl.sh を使うこと。
+
+# =============================================
+# 6. API仕様
+# =============================================
+api_spec:
+  base_url: "https://{api-id}.execute-api.ap-northeast-1.amazonaws.com/prod"
+  cors: "AllowOrigins: * （WebGLはブラウザから直接APIを叩くためCORS必須）"
+
+  endpoints:
+    - method: "POST"
+      path: "/scores"
+      description: "スコア送信（ゲームクリア時に自動で呼ばれる）"
+      request_body:
+        playerName: "string (最大10文字、空なら'ななし')"
+        score: "int (きりみ数 = ゲームスコア)"
+        rank: "string (おさしみ級/たたき級/にぎり級/あら煮級/エサ級)"
+        clearPercent: "int (ブロック破壊率 0-100)"
+      response: '201 {"message": "Score submitted", "id": "uuid"}'
+
+    - method: "GET"
+      path: "/scores?limit=N"
+      description: "ランキング取得（スコア降順、最大50件）"
+      response: '200 [{"playerName":"...","score":500,"rank":"...","clearPercent":100,"timestamp":"..."}]'
+
+  rank_thresholds:
+    - "おさしみ級: 破壊率100%（パーフェクトクリア）"
+    - "たたき級: 破壊率 80-99%"
+    - "にぎり級: 破壊率 60-79%"
+    - "あら煮級: 破壊率 40-59%"
+    - "エサ級: 破壊率 0-39%"
+
+# =============================================
+# 7. DynamoDB テーブル設計
+# =============================================
+dynamodb:
+  table_name: "SabakeLeaderboard"
+  primary_key: "id (String, UUID自動生成)"
+  gsi:
+    name: "ScoreRankIndex"
+    how_it_works: |
+      全レコードに gsi_pk='ALL' を付与。
+      GSI の Sort Key = score (Number) で降順クエリ。
+      → TOP N 件を1回のQueryで高速取得。
+
+# =============================================
+# 8. Unity側の仕組み（コードを触る人向け）
+# =============================================
+unity_internals:
+  config_loading: |
+    API URLはコードにハードコードしない。
+    Assets/StreamingAssets/env.json に書き、起動時に読み込む。
+
+    読み込みの流れ:
+      TitleScene Start
+        → GameConfig.LoadConfig()  ← UnityWebRequest で env.json を GET
+        → GameConfig.LEADERBOARD_API_URL にセット
+
+      SampleScene を直接起動した場合（エディタテスト）:
+        → GameManager.Start() でフォールバック読み込み
+
+    env.json が無い or API URLが空の場合:
+      → ランキング機能が無効になるだけ（ゲーム自体は正常動作）
+
+  env_json:
+    fields:
+      environment: "環境名 (test / production)"
+      leaderboardApiUrl: "API GatewayのURL"
+    switching: |
+      env.json を差し替えるだけで接続先を切替可能。
+      WebGLビルド後でも Build/StreamingAssets/env.json を差し替えればOK。
+
+  build_mode_flag: |
+    GameConfig.IS_AWS_BUILD = true（コンパイル時定数）
+    true:  1ステージ完結、ランキング有効、タイトルに名前入力
+    false: マルチステージ、スキル有効、ランキング無効（開発版）
+
+  score_submission_flow: |
+    ゲームクリア
+      → UIManager.ShowResultPanel()
+        → スコア・ランク・破壊率を計算
+        → UIManager.SubmitScore() を呼ぶ
+          → GameConfig.LEADERBOARD_API_URL が空なら何もしない
+          → 空でなければ LeaderboardClient.SubmitScore() で POST
+
+    ランキング表示（「次へ」ボタン押下後）
+      → UIManager.ShowRankingPanel()
+        → LeaderboardClient.GetTopScores(10) で GET
+        → UI に TOP10 を描画
+
+# =============================================
+# 9. トラブルシューティング
+# =============================================
+troubleshooting:
+  game_not_loading:
+    problem: "CloudFront URLにアクセスしてもゲームが表示されない"
+    check:
+      - "CloudFrontの反映に5-10分かかるので待つ"
+      - "deploy-webgl.sh を使ってアップロードしたか（aws s3 sync 直接はNG）"
+      - "ブラウザのF12コンソールでエラーを確認"
+      - "Content-Type/Content-Encoding エラーなら deploy-webgl.sh を再実行"
+
+  setup_script_failed:
+    problem: "setup-leaderboard.sh / setup-hosting.sh が途中でエラー"
+    solution: |
+      対応する cleanup スクリプトを実行してから再セットアップ:
+        bash aws-setup/cleanup-leaderboard.sh
+        bash aws-setup/setup-leaderboard.sh
+
+      または:
+        bash aws-setup/cleanup-hosting.sh
+        bash aws-setup/setup-hosting.sh
+
+  score_not_submitted:
+    problem: "ゲームクリアしてもスコアが送信されない"
+    check:
+      - "env.json が StreamingAssets/ に存在するか"
+      - "env.json の leaderboardApiUrl が正しいURLか"
+      - "ブラウザF12で [GameConfig] env.json loaded ログがあるか"
+      - "ブラウザF12で [LeaderboardClient] API URL not set が出ていないか"
+      - "ブラウザF12でCORSエラーが出ていないか"
+
+  ranking_empty:
+    problem: "ランキング画面が空"
+    check:
+      - "curl GET /scores?limit=10 で直接APIを叩いてデータが返るか"
+      - "AWSコンソール → DynamoDB → SabakeLeaderboard → 項目を探索 でデータがあるか"
+
+  cors_error:
+    problem: "ブラウザF12に CORS エラー"
+    solution: |
+      AWSコンソール → API Gateway → SabakeLeaderboardAPI → CORS:
+        AllowOrigins: *
+        AllowMethods: GET, POST, OPTIONS
+        AllowHeaders: Content-Type
+
+# =============================================
+# 10. リソース削除
+# =============================================
+cleanup:
+  description: |
+    不要になったらリソースを削除。
+    ランキングAPIとホスティングは独立しているので個別に削除可能。
+
+  leaderboard_api:
+    command: "bash aws-setup/cleanup-leaderboard.sh"
+    deletes:
+      - "API Gateway (SabakeLeaderboardAPI)"
+      - "Lambda (SabakeLeaderboardFunc)"
+      - "IAM Role (SabakeLeaderboardLambdaRole)"
+      - "DynamoDB (SabakeLeaderboard) ※スコアデータも消える"
+
+  hosting:
+    command: "bash aws-setup/cleanup-hosting.sh"
+    deletes:
+      - "CloudFront ディストリビューション"
+      - "CloudFront OAC"
+      - "S3 バケット (中身ごと削除)"
+    note: |
+      CloudFront の削除には15-20分かかる。
+      スクリプトが「無効化待ち中」と出たら、20分後に再実行。

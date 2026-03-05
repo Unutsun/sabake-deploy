@@ -1,0 +1,17 @@
+# deploy ブランチでは webgl-build/, aws-setup/, AWS_README.yaml のみ管理
+# それ以外は全て除外
+
+# 環境設定（担当者がローカルで作成）
+aws-setup/.env
+webgl-build/StreamingAssets/env.json
+
+# Unity プロジェクト（deploy ブランチには不要）
+*/Temp/
+*/Library/
+*/Logs/
+*/obj/
+*/UserSettings/
+
+# OS
+.DS_Store
+Thumbs.db
