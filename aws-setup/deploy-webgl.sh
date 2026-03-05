@@ -105,10 +105,12 @@ echo ""
 echo "[2/4] 通常ファイルをアップロード..."
 
 # まず全体を同期（Content-Typeは自動判定）
+# env.json はS3上で直接管理するため、--delete で消さない
 aws s3 sync "$BUILD_DIR" "s3://${BUCKET}" \
   --region $REGION \
   --exclude "*.gz" \
   --exclude "*.br" \
+  --exclude "StreamingAssets/env.json" \
   --delete
 
 echo "  OK: 通常ファイルアップロード完了"
