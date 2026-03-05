@@ -27,9 +27,9 @@ echo "=========================================="
 cat > /tmp/lambda_function.py << 'LAMBDA_EOF'
 import json
 import boto3
+import uuid
 import os
 from datetime import datetime, timezone
-from decimal import Decimal
 
 dynamodb = boto3.resource('dynamodb')
 table = dynamodb.Table(os.environ.get('TABLE_NAME', 'SabakeLeaderboard'))
@@ -42,6 +42,8 @@ def lambda_handler(event, context):
         return handle_post(event)
     elif method == 'GET':
         return handle_get(event)
+    elif method == 'OPTIONS':
+        return response(200, '')
     else:
         return response(405, {'error': 'Method not allowed'})
 
@@ -54,31 +56,41 @@ def handle_post(event):
         return response(400, {'error': 'Invalid JSON'})
 
     player_name = body.get('playerName', '').strip()
-    score = body.get('score', 0)
-
     if not player_name:
-        return response(400, {'error': 'playerName is required'})
+        player_name = 'ななし'
 
-    timestamp = datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+    timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
     item = {
+        'id': str(uuid.uuid4()),
+        'gsi_pk': 'ALL',
         'playerName': player_name,
-        'timestamp': timestamp,
-        'score': score,
+        'score': body.get('score', 0),
         'rank': body.get('rank', ''),
-        'clearPercent': body.get('clearPercent', 0)
+        'clearPercent': body.get('clearPercent', 0),
+        'timestamp': timestamp
     }
 
     table.put_item(Item=item)
-    return response(200, {'message': 'Score submitted', 'timestamp': timestamp})
+    return response(201, {'message': 'Score submitted', 'id': item['id']})
 
 
 def handle_get(event):
-    """スコア取得（上位N件）"""
+    """スコア取得（GSI使用、score降順）"""
     params = event.get('queryStringParameters') or {}
-    limit = min(int(params.get('limit', 10)), 100)
+    try:
+        limit = int(params.get('limit', '10'))
+    except ValueError:
+        limit = 10
+    limit = min(max(limit, 1), 50)
 
-    result = table.scan()
+    result = table.query(
+        IndexName='ScoreRankIndex',
+        KeyConditionExpression='gsi_pk = :pk',
+        ExpressionAttributeValues={':pk': 'ALL'},
+        ScanIndexForward=False,
+        Limit=limit
+    )
 
     items = []
     for item in result.get('Items', []):
@@ -89,9 +101,6 @@ def handle_get(event):
             'clearPercent': int(item.get('clearPercent', 0)),
             'timestamp': item.get('timestamp', '')
         })
-
-    items.sort(key=lambda x: x['score'], reverse=True)
-    items = items[:limit]
 
     return response(200, items)
 
@@ -128,7 +137,8 @@ echo ""
 echo "  動作確認中..."
 sleep 2
 
-TEST_RESULT=$(curl -s -D- "https://$(aws apigatewayv2 get-apis --region $REGION --output text --query "Items[?Name=='${API_NAME:-SabakeLeaderboardAPI}'].ApiEndpoint" | head -1)/scores?limit=1" 2>&1 | head -10)
+API_ENDPOINT=$(aws apigatewayv2 get-apis --region $REGION --output text --query "Items[?Name=='${API_NAME:-SabakeLeaderboardAPI}'].ApiEndpoint" | head -1)
+TEST_RESULT=$(curl -s -D- "${API_ENDPOINT}/prod/scores?limit=1" 2>&1 | head -10)
 echo "$TEST_RESULT"
 
 if echo "$TEST_RESULT" | grep -q "access-control-allow-origin"; then
