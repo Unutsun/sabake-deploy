@@ -95,15 +95,20 @@ setup_procedure:
       - "右上の CloudShell アイコンをクリックしてターミナルを開く"
       - "以下のコマンドでリポジトリを取得:"
     commands:
-      - "git clone --branch deploy --single-branch https://github.com/Unutsun/Unity.git sabake-deploy"
-      - "cd sabake-deploy"
+      - "git clone --branch deploy --single-branch https://github.com/Unutsun/Unity.git"
+      - "cd Unity"
       - "cp aws-setup/.env.example aws-setup/.env"
     after_clone: |
       aws-setup/.env を開いて、必要なら S3_BUCKET_NAME を変更する。
+      ※ CloudShell のエディタ: 右上「Actions」→「Open File」で .env を開ける
     note: |
       プライベートリポジトリのため、GitHub認証情報が必要。
-      CloudShell で git clone に失敗した場合は、GitHub の Personal Access Token を使う:
-        git clone https://<TOKEN>@github.com/Unutsun/Unity.git sabake-deploy --branch deploy --single-branch
+      CloudShell で git clone に失敗した場合は、Personal Access Token を URL に含める:
+        git clone --branch deploy --single-branch https://<TOKEN>@github.com/Unutsun/Unity.git
+    cloudshell_tips: |
+      CloudShell は20分無操作でセッションが切れ、ホームディレクトリ以外は消える。
+      ただし ~/Unity は $HOME 配下なので git clone 先は保持される。
+      セッションが切れた場合は cd Unity で戻れる。
 
   step_1:
     title: "ランキングAPI構築"
@@ -133,22 +138,24 @@ setup_procedure:
     note: "CloudFrontの反映に5-10分かかる場合がある"
 
   step_3:
-    title: "env.json を作成"
-    what_it_does: "ビルド内にAPI URLを設定する"
-    substeps:
-      - title: "env.json を作成"
-        detail: |
-          webgl-build/StreamingAssets/env.json.example を env.json にコピーし、
-          step_1 で取得したAPI URLを記入:
-            cp webgl-build/StreamingAssets/env.json.example webgl-build/StreamingAssets/env.json
-          内容:
-            {
-              "environment": "production",
-              "leaderboardApiUrl": "https://xxxxxxxxxx.execute-api.ap-northeast-1.amazonaws.com/prod"
-            }
+    title: "env.json を作成（初回のみ）"
+    what_it_does: "ゲームにランキングAPIのURLを教える設定ファイルを作成する"
+    command: |
+      以下のコマンドを1行で実行する（URLは step_1 で取得したものに置換）:
+        echo '{"leaderboardApiUrl":"https://xxxxxxxxxx.execute-api.ap-northeast-1.amazonaws.com/prod"}' > webgl-build/StreamingAssets/env.json
+    important: |
+      ⚠ echoコマンドは必ず1行で入力すること！
+      途中で改行が入るとJSONが壊れてゲームがAPIに接続できなくなる。
+      CloudShellの画面幅が狭いと自動折り返しで改行が入ることがあるので注意。
+    verify: |
+      作成後に内容を確認:
+        cat webgl-build/StreamingAssets/env.json
+      正常: {"leaderboardApiUrl":"https://...amazonaws.com/prod"}
+      異常: 途中に改行がある、URLが途切れている
     note: |
       env.json は .gitignore で除外されているため、git pull で上書きされない。
-      一度作成すればゲーム更新時も再作成不要。
+      deploy-webgl.sh も env.json をS3から削除しない設定になっている。
+      一度作成・デプロイすれば、ゲーム更新時は再作成不要。
 
   step_4:
     title: "ビルドをS3にデプロイ"
@@ -188,13 +195,17 @@ setup_procedure:
 update_procedure:
   description: "ゲームが更新された場合、以下の2コマンドだけでOK"
   commands:
+    - "cd ~/Unity"
     - "git pull"
     - "bash aws-setup/deploy-webgl.sh"
+  what_happens: |
+    1. git pull → 最新のビルドが webgl-build/ に反映される
+    2. deploy-webgl.sh → S3にアップロード＋CloudFrontキャッシュ無効化
+    3. 数分後に https://<CloudFront URL> で最新版が遊べる
   note: |
-    git pull で最新のビルドが webgl-build/ に反映される。
-    deploy-webgl.sh がそれをS3にアップロードし、CloudFrontキャッシュを無効化。
-    env.json は .gitignore で除外されているため、git pull で消えない。
-    setup-leaderboard.sh と setup-hosting.sh は初回のみ。
+    - env.json はS3上で保持される（git pull でもデプロイでも消えない）
+    - setup-leaderboard.sh と setup-hosting.sh は初回のみ。更新時は不要
+    - CloudShellセッションが切れても ~/Unity は保持される
 
 # =============================================
 # 5. WebGLビルドの注意事項
@@ -328,6 +339,18 @@ troubleshooting:
       または:
         bash aws-setup/cleanup-hosting.sh
         bash aws-setup/setup-hosting.sh
+
+  ranking_api_not_set:
+    problem: "ランキング画面に「ランキングAPI未設定」と表示される"
+    cause: "S3上に env.json が無い、または中身が壊れている"
+    fix: |
+      1. env.json を再作成:
+         echo '{"leaderboardApiUrl":"https://xxxxxxxxxx.execute-api.ap-northeast-1.amazonaws.com/prod"}' > webgl-build/StreamingAssets/env.json
+      2. S3にアップロード:
+         source aws-setup/.env
+         aws s3 cp webgl-build/StreamingAssets/env.json s3://${S3_BUCKET_NAME}/StreamingAssets/env.json
+      3. CloudFrontキャッシュクリア:
+         aws cloudfront create-invalidation --distribution-id ${CLOUDFRONT_DIST_ID} --paths "/*"
 
   score_not_submitted:
     problem: "ゲームクリアしてもスコアが送信されない"
