@@ -60,6 +60,13 @@ AWS_SETUP_DIR="$PROJECT_DIR/aws-setup"
 AWS_README="$PROJECT_DIR/AWS_README.yaml"
 ENV_JSON_EXAMPLE="$PROJECT_DIR/Assets/StreamingAssets/env.json.example"
 
+# ブランチ切替で tracked ファイルが消えるため、一時ディレクトリに退避
+TMPDIR_PUSH="$(mktemp -d)"
+trap "rm -rf '$TMPDIR_PUSH'" EXIT
+cp -r "$AWS_SETUP_DIR" "$TMPDIR_PUSH/aws-setup"
+[ -f "$AWS_README" ] && cp "$AWS_README" "$TMPDIR_PUSH/AWS_README.yaml"
+[ -f "$ENV_JSON_EXAMPLE" ] && cp "$ENV_JSON_EXAMPLE" "$TMPDIR_PUSH/env.json.example"
+
 echo "=========================================="
 echo " WebGLビルド → deploy ブランチに push"
 echo " ビルド元:   $BUILD_DIR"
@@ -132,8 +139,8 @@ done
 # env.json.example を配置
 if [ ! -f webgl-build/StreamingAssets/env.json.example ]; then
   mkdir -p webgl-build/StreamingAssets
-  if [ -f "$ENV_JSON_EXAMPLE" ]; then
-    cp "$ENV_JSON_EXAMPLE" webgl-build/StreamingAssets/
+  if [ -f "$TMPDIR_PUSH/env.json.example" ]; then
+    cp "$TMPDIR_PUSH/env.json.example" webgl-build/StreamingAssets/
   else
     cat > webgl-build/StreamingAssets/env.json.example << 'ENVEOF'
 {
@@ -146,19 +153,19 @@ fi
 
 echo "  OK: webgl-build/ にコピー完了"
 
-# aws-setup/ をコピー
+# aws-setup/ をコピー（一時退避したファイルを使用）
 echo ""
 echo "[4/5] aws-setup/ と README をコピー..."
 
 mkdir -p aws-setup/
-for f in "$AWS_SETUP_DIR"/*; do
+for f in "$TMPDIR_PUSH/aws-setup"/*; do
   [ -f "$f" ] && cp "$f" aws-setup/
 done
 # .env.example もコピー
-[ -f "$AWS_SETUP_DIR/.env.example" ] && cp "$AWS_SETUP_DIR/.env.example" aws-setup/
+[ -f "$TMPDIR_PUSH/aws-setup/.env.example" ] && cp "$TMPDIR_PUSH/aws-setup/.env.example" aws-setup/
 
 # AWS_README.yaml をコピー
-[ -f "$AWS_README" ] && cp "$AWS_README" .
+[ -f "$TMPDIR_PUSH/AWS_README.yaml" ] && cp "$TMPDIR_PUSH/AWS_README.yaml" .
 
 echo "  OK: aws-setup/ と AWS_README.yaml をコピー完了"
 

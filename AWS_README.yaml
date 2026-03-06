@@ -159,7 +159,7 @@ setup_procedure:
     title: "ビルドをS3にデプロイ"
     what_it_does: |
       webgl-build/ のWebGLビルドをS3にアップロード。
-      .wasm.gz / .data.gz / .js.gz に正しいContent-Type/Content-Encoding を設定。
+      .wasm.br / .data.br / .js.br に正しいContent-Type/Content-Encoding を設定。
       CloudFrontキャッシュを無効化。
     commands:
       - "bash aws-setup/deploy-webgl.sh"
@@ -210,15 +210,16 @@ update_procedure:
 # =============================================
 webgl_build_notes:
   compression: |
-    Unity の Compression Format: Gzip を使用（現在の設定）。
-    S3にアップロードする際、.gz ファイルには以下のヘッダーが必要:
-      .wasm.gz → Content-Type: application/wasm, Content-Encoding: gzip
-      .data.gz → Content-Type: application/octet-stream, Content-Encoding: gzip
-      .js.gz   → Content-Type: application/javascript, Content-Encoding: gzip
+    Unity の Compression Format: Brotli を使用（現在の設定）。
+    S3にアップロードする際、.br ファイルには以下のヘッダーが必要:
+      .wasm.br → Content-Type: application/wasm, Content-Encoding: br
+      .data.br → Content-Type: application/octet-stream, Content-Encoding: br
+      .js.br   → Content-Type: application/javascript, Content-Encoding: br
     deploy-webgl.sh がこれを自動処理するため手動設定は不要。
+    ※ Gzip (.gz) 形式にも対応しているため、ビルド設定変更時も追加作業不要。
 
   https_requirement: |
-    WebGL の Gzip 圧縮ファイルを正常にロードするには HTTPS が必要。
+    WebGL の圧縮ファイルを正常にロードするには HTTPS が必要。
     CloudFront が HTTPS を提供するため、直接 S3 URL ではなく
     CloudFront URL（https://xxxxx.cloudfront.net）でアクセスすること。
 
