@@ -200,6 +200,15 @@ else
   git commit -m "build: WebGL update ${TIMESTAMP}"
   git push origin "$DEPLOY_BRANCH"
   echo "  OK: deploy ブランチに push 完了"
+
+  # Public デプロイ用リポジトリにも push（担当者はこちらから clone）
+  DEPLOY_PUBLIC_REMOTE="deploy-public"
+  if git remote get-url "$DEPLOY_PUBLIC_REMOTE" >/dev/null 2>&1; then
+    echo ""
+    echo "  Public リポ (sabake-deploy) にも push..."
+    git push "$DEPLOY_PUBLIC_REMOTE" "$DEPLOY_BRANCH":main
+    echo "  OK: sabake-deploy にも push 完了"
+  fi
 fi
 
 # =============================================

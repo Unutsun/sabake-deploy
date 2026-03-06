@@ -95,20 +95,18 @@ setup_procedure:
       - "右上の CloudShell アイコンをクリックしてターミナルを開く"
       - "以下のコマンドでリポジトリを取得:"
     commands:
-      - "git clone --branch deploy --single-branch https://github.com/Unutsun/Unity.git"
-      - "cd Unity"
+      - "git clone https://github.com/Unutsun/sabake-deploy.git"
+      - "cd sabake-deploy"
       - "cp aws-setup/.env.example aws-setup/.env"
     after_clone: |
       aws-setup/.env を開いて、必要なら S3_BUCKET_NAME を変更する。
       ※ CloudShell のエディタ: 右上「Actions」→「Open File」で .env を開ける
     note: |
-      プライベートリポジトリのため、GitHub認証情報が必要。
-      CloudShell で git clone に失敗した場合は、Personal Access Token を URL に含める:
-        git clone --branch deploy --single-branch https://<TOKEN>@github.com/Unutsun/Unity.git
+      公開リポジトリのため認証不要。そのまま git clone できる。
     cloudshell_tips: |
       CloudShell は20分無操作でセッションが切れ、ホームディレクトリ以外は消える。
-      ただし ~/Unity は $HOME 配下なので git clone 先は保持される。
-      セッションが切れた場合は cd Unity で戻れる。
+      ただし ~/sabake-deploy は $HOME 配下なので git clone 先は保持される。
+      セッションが切れた場合は cd sabake-deploy で戻れる。
 
   step_1:
     title: "ランキングAPI構築"
@@ -195,7 +193,7 @@ setup_procedure:
 update_procedure:
   description: "ゲームが更新された場合、以下の2コマンドだけでOK"
   commands:
-    - "cd ~/Unity"
+    - "cd ~/sabake-deploy"
     - "git pull"
     - "bash aws-setup/deploy-webgl.sh"
   what_happens: |
@@ -205,7 +203,7 @@ update_procedure:
   note: |
     - env.json はS3上で保持される（git pull でもデプロイでも消えない）
     - setup-leaderboard.sh と setup-hosting.sh は初回のみ。更新時は不要
-    - CloudShellセッションが切れても ~/Unity は保持される
+    - CloudShellセッションが切れても ~/sabake-deploy は保持される
 
 # =============================================
 # 5. WebGLビルドの注意事項
